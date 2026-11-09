@@ -16,6 +16,30 @@ pub struct RecentEntry {
     pub locked_at_unix: u64,
 }
 
+/// What the app was asked to do at launch, e.g. from the Windows
+/// right-click menu: `--lock <path>` or `--unlock <path>`.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LaunchTarget {
+    pub mode: String,
+    pub path: String,
+}
+
+pub fn parse_launch_target(args: &[String]) -> Option<LaunchTarget> {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--lock" | "--unlock" => {
+                let mode = if args[i] == "--lock" { "lock" } else { "unlock" };
+                return args
+                    .get(i + 1)
+                    .map(|path| LaunchTarget { mode: mode.to_string(), path: path.clone() });
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -162,9 +186,136 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
         .map_err(|e| format!("Could not open folder: {e}"))
 }
 
+#[tauri::command]
+fn get_launch_target(state: tauri::State<Option<LaunchTarget>>) -> Option<LaunchTarget> {
+    state.inner().clone()
+}
+
+// ---------- Windows right-click menu (HKCU, no admin needed) ----------
+#[cfg(target_os = "windows")]
+mod ctx_menu {
+    use std::path::PathBuf;
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    fn exe_path() -> Result<String, String> {
+        let exe: PathBuf =
+            std::env::current_exe().map_err(|e| format!("Could not find VaultLock exe: {e}"))?;
+        Ok(exe.to_string_lossy().into_owned())
+    }
+
+    fn classes() -> Result<RegKey, String> {
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(r"Software\Classes", KEY_ALL_ACCESS)
+            .map_err(|e| format!("Could not open registry: {e}"))
+    }
+
+    pub fn supported() -> bool {
+        true
+    }
+
+    pub fn status() -> bool {
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(r"Software\Classes\*\shell\VaultLock")
+            .is_ok()
+    }
+
+    pub fn set(enabled: bool) -> Result<bool, String> {
+        let classes = classes()?;
+        if enabled {
+            let exe = exe_path()?;
+            // Files: right-click any file -> Lock with VaultLock
+            let (key, _) = classes
+                .create_subkey(r"*\shell\VaultLock")
+                .map_err(|e| e.to_string())?;
+            key.set_value("", &"Lock with VaultLock")
+                .map_err(|e| e.to_string())?;
+            key.set_value("Icon", &exe).map_err(|e| e.to_string())?;
+            let (cmd, _) = classes
+                .create_subkey(r"*\shell\VaultLock\command")
+                .map_err(|e| e.to_string())?;
+            cmd.set_value("", &format!("\"{exe}\" --lock \"%1\""))
+                .map_err(|e| e.to_string())?;
+            // Folders: right-click a folder -> Lock with VaultLock
+            let (key, _) = classes
+                .create_subkey(r"Directory\shell\VaultLock")
+                .map_err(|e| e.to_string())?;
+            key.set_value("", &"Lock with VaultLock")
+                .map_err(|e| e.to_string())?;
+            key.set_value("Icon", &exe).map_err(|e| e.to_string())?;
+            let (cmd, _) = classes
+                .create_subkey(r"Directory\shell\VaultLock\command")
+                .map_err(|e| e.to_string())?;
+            cmd.set_value("", &format!("\"{exe}\" --lock \"%1\""))
+                .map_err(|e| e.to_string())?;
+            // .vaultlock files -> Unlock with VaultLock
+            let (assoc, _) = classes.create_subkey(r".vaultlock").map_err(|e| e.to_string())?;
+            assoc
+                .set_value("", &"VaultLock.vault")
+                .map_err(|e| e.to_string())?;
+            let (key, _) = classes
+                .create_subkey(r"VaultLock.vault\shell\open")
+                .map_err(|e| e.to_string())?;
+            key.set_value("", &"Unlock with VaultLock")
+                .map_err(|e| e.to_string())?;
+            key.set_value("Icon", &exe).map_err(|e| e.to_string())?;
+            let (cmd, _) = classes
+                .create_subkey(r"VaultLock.vault\shell\open\command")
+                .map_err(|e| e.to_string())?;
+            cmd.set_value("", &format!("\"{exe}\" --unlock \"%1\""))
+                .map_err(|e| e.to_string())?;
+        } else {
+            let _ = classes.delete_subkey_all(r"*\shell\VaultLock");
+            let _ = classes.delete_subkey_all(r"Directory\shell\VaultLock");
+            let _ = classes.delete_subkey_all(r"VaultLock.vault");
+            let _ = classes.delete_subkey_all(r".vaultlock");
+        }
+        Ok(enabled)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod ctx_menu {
+    pub fn supported() -> bool {
+        false
+    }
+
+    pub fn status() -> bool {
+        false
+    }
+
+    pub fn set(_enabled: bool) -> Result<bool, String> {
+        Err("The right-click menu is only available on Windows.".to_string())
+    }
+}
+
+#[tauri::command]
+fn context_menu_supported() -> bool {
+    ctx_menu::supported()
+}
+
+#[tauri::command]
+fn context_menu_status() -> bool {
+    ctx_menu::status()
+}
+
+#[tauri::command]
+fn set_context_menu(enabled: bool) -> Result<bool, String> {
+    ctx_menu::set(enabled)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run(launch_target: Option<LaunchTarget>) {
     tauri::Builder::default()
+        .manage(launch_target)
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(target) = parse_launch_target(&argv) {
+                let _ = app.emit("vaultlock-open", target);
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             pick_file,
             pick_folder,
@@ -173,7 +324,11 @@ pub fn run() {
             unlock_item,
             get_recent,
             forget_recent,
-            reveal_in_folder
+            reveal_in_folder,
+            get_launch_target,
+            context_menu_supported,
+            context_menu_status,
+            set_context_menu
         ])
         .run(tauri::generate_context!())
         .expect("error while running VaultLock");

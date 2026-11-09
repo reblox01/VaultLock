@@ -33,7 +33,24 @@ VaultLock fixes all of that:
   half restored folder behind.
 - Drag and drop, browse dialogs, password strength meter, progress
   bar, and a list of your vaults with unlock, show in folder, forget.
+- macOS-style interface: sidebar navigation, system palette in light
+  and dark, SF-style icons, keyboard shortcuts (Ctrl/Cmd+1 to 4 to
+  switch views, Enter to lock or unlock, Esc to clear).
 - 100% offline. Nothing leaves your machine.
+
+## Right-click menu (Windows)
+
+On first launch on Windows, VaultLock adds itself to the Explorer
+right-click menu (HKCU, no admin needed):
+
+- Right-click any file or folder: **Lock with VaultLock**. The app
+  opens on the Lock view with that item already picked.
+- Right-click any `.vaultlock` file: **Unlock with VaultLock**. The
+  app opens on the Unlock view with the vault already picked.
+
+You can remove or re-add it any time from Settings. The menu works
+through a single instance: if VaultLock is already running, the
+right-click opens the existing window instead of a second copy.
 
 ## Security details
 
@@ -80,15 +97,15 @@ The Tauri CLI is installed on demand by `npm run tauri` (it uses the
 
 ## Usage
 
-1. Open VaultLock, stay on the Lock tab.
+1. Open VaultLock, stay on Lock in the sidebar.
 2. Pick File or Folder, then click the drop zone or drop something on it.
 3. Set a password (at least 8 characters, a passphrase is best) and
    confirm it.
 4. Press Lock it. The original is deleted only after the vault is
    written and verified to open with your password.
-5. To unlock, go to the Unlock tab, pick the `.vaultlock` file, enter
-   the password, and press Unlock it. The original appears next to
-   the vault, and the vault file is deleted.
+5. To unlock, go to Unlock in the sidebar, pick the `.vaultlock` file,
+   enter the password, and press Unlock it. The original appears next
+   to the vault, and the vault file is deleted.
 
 ## Vault format
 
@@ -106,7 +123,6 @@ with its own nonce.
 
 - Change password on an existing vault.
 - Secure overwrite of originals before deletion.
-- Right-click "Lock with VaultLock" in the file manager.
 - Auto-lock timer for folders left unlocked.
 
 ## License

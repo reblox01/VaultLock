@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    vaultlock::run();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    vaultlock::run(vaultlock::parse_launch_target(&args));
 }

@@ -20,6 +20,10 @@ base64 = "0.22"
 walkdir = "2"
 rfd = "0.15"
 zeroize = "1"
+tauri-plugin-single-instance = "2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
 
 [profile.release]
 lto = true
