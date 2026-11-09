@@ -1,6 +1,6 @@
 [package]
 name = "vaultlock"
-version = "0.1.0"
+version = "0.1.1"
 description = "Lock any file or folder with a password. Real AES-256-GCM encryption, Argon2id key derivation, no backdoor."
 authors = ["Sohail Koutari"]
 edition = "2021"
