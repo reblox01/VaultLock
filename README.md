@@ -36,6 +36,11 @@ VaultLock fixes all of that:
 - macOS-style interface: sidebar navigation, system palette in light
   and dark, SF-style icons, keyboard shortcuts (Ctrl/Cmd+1 to 4 to
   switch views, Enter to lock or unlock, Esc to clear).
+- Temporary access: double-click a vault (or right-click it and pick
+  Access) and a small password prompt opens instead of the whole app.
+  Your files decrypt into a temp folder, the vault stays locked, and
+  Lock again saves any changes back into the vault and wipes the temp
+  folder. The password is never stored.
 - 100% offline. Nothing leaves your machine.
 
 ## Right-click menu (Windows)
@@ -45,8 +50,10 @@ right-click menu (HKCU, no admin needed):
 
 - Right-click any file or folder: **Lock with VaultLock**. The app
   opens on the Lock view with that item already picked.
-- Right-click any `.vaultlock` file: **Unlock with VaultLock**. The
-  app opens on the Unlock view with the vault already picked.
+- Right-click any `.vaultlock` file: **Access with VaultLock**. A small
+  password prompt opens, the files decrypt into a temp folder, and the
+  vault stays locked. **Unlock with VaultLock** is also there for a
+  permanent restore, which deletes the vault.
 
 You can remove or re-add it any time from Settings. The menu works
 through a single instance: if VaultLock is already running, the
@@ -67,8 +74,10 @@ right-click opens the existing window instead of a second copy.
 ### Windows (easiest)
 
 Download `VaultLock_x64.msi` or `VaultLock_x64-setup.exe` from the
-GitHub Releases page and install it. Releases are built automatically
-by GitHub Actions when a `v*` tag is pushed.
+GitHub Releases page and install it. Releases are automatic: every
+push to `main` that touches code bumps the patch version, tags it,
+and GitHub Actions builds and publishes the release. To push code
+without releasing, put `[skip release]` in the commit message.
 
 ### Build it yourself
 
@@ -106,6 +115,11 @@ The Tauri CLI is installed on demand by `npm run tauri` (it uses the
 5. To unlock, go to Unlock in the sidebar, pick the `.vaultlock` file,
    enter the password, and press Unlock it. The original appears next
    to the vault, and the vault file is deleted.
+6. To just look inside without unlocking, double-click the vault (or
+   pick Access in My Vaults). A small password prompt opens, the files
+   decrypt into a temp folder, and the vault stays locked. Press Lock
+   again when you are done: any changes are saved back into the vault
+   and the temp folder is wiped.
 
 ## Vault format
 

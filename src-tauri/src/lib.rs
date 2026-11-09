@@ -3,9 +3,11 @@ mod vault;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
-use vault::{lock_path, unlock_path, LockResult, ProgressEvent, UnlockResult};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use vault::{access_decrypt, access_relock, lock_path, unlock_path, AccessInfo, LockResult, ProgressEvent, UnlockResult};
+use zeroize::Zeroizing;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RecentEntry {
@@ -28,8 +30,12 @@ pub fn parse_launch_target(args: &[String]) -> Option<LaunchTarget> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--lock" | "--unlock" => {
-                let mode = if args[i] == "--lock" { "lock" } else { "unlock" };
+            "--lock" | "--unlock" | "--access" => {
+                let mode = match args[i].as_str() {
+                    "--lock" => "lock",
+                    "--unlock" => "unlock",
+                    _ => "access",
+                };
                 return args
                     .get(i + 1)
                     .map(|path| LaunchTarget { mode: mode.to_string(), path: path.clone() });
@@ -38,6 +44,51 @@ pub fn parse_launch_target(args: &[String]) -> Option<LaunchTarget> {
         }
     }
     None
+}
+
+/// One active temporary-access session. Only one vault can be open
+/// for access at a time; the password lives only in memory while the
+/// session is active and is zeroed when it ends.
+pub struct AccessSession {
+    pub vault_path: String,
+    pub info: AccessInfo,
+    pub password: Zeroizing<String>,
+}
+
+fn open_prompt_window(app: &AppHandle, vault_path: &str, solo: bool) -> Result<(), String> {
+    if let Some(slot) = app.try_state::<Mutex<Option<String>>>() {
+        if let Ok(mut target) = slot.lock() {
+            *target = Some(vault_path.to_string());
+        }
+    }
+    if let Some(win) = app.get_webview_window("access-prompt") {
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let url = if solo {
+        "index.html?mode=access&solo=1"
+    } else {
+        "index.html?mode=access&solo=0"
+    };
+    let builder = WebviewWindowBuilder::new(app, "access-prompt", WebviewUrl::App(url.into()))
+        .title("VaultLock - Access")
+        .inner_size(400.0, 340.0)
+        .resizable(false)
+        .center();
+    let win = builder
+        .build()
+        .map_err(|e| format!("Could not open prompt: {e}"))?;
+    if solo {
+        // Access-only launch: closing the prompt ends the app, so a
+        // hidden main window never lingers invisibly.
+        let handle = app.clone();
+        win.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                handle.exit(0);
+            }
+        });
+    }
+    Ok(())
 }
 
 fn now_unix() -> u64 {
@@ -191,6 +242,150 @@ fn get_launch_target(state: tauri::State<Option<LaunchTarget>>) -> Option<Launch
     state.inner().clone()
 }
 
+// ---------- Temporary access: password prompt, temp decrypt, re-lock ----------
+#[tauri::command]
+async fn access_vault(
+    app: AppHandle,
+    vault_path: String,
+    password: String,
+) -> Result<AccessInfo, String> {
+    {
+        let state = app.state::<Mutex<Option<AccessSession>>>();
+        let session = state
+            .lock()
+            .map_err(|_| "Access session is busy.".to_string())?;
+        if let Some(active) = session.as_ref() {
+            if active.vault_path == vault_path {
+                return Ok(active.info.clone());
+            }
+            return Err(format!(
+                "You are already accessing {}. Lock it again first.",
+                active.info.name
+            ));
+        }
+    }
+    let handle = app.clone();
+    let vault_for_task = vault_path.clone();
+    let password_for_task = password.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        let progress = |event: ProgressEvent| {
+            let _ = handle.emit("vault-progress", &event);
+        };
+        access_decrypt(&PathBuf::from(&vault_for_task), &password_for_task, &progress)
+    })
+    .await
+    .map_err(|e| format!("Access task failed: {e}"))??;
+    let state = app.state::<Mutex<Option<AccessSession>>>();
+    let mut session = state
+        .lock()
+        .map_err(|_| "Access session is busy.".to_string())?;
+    *session = Some(AccessSession {
+        vault_path,
+        info: info.clone(),
+        password: Zeroizing::new(password),
+    });
+    Ok(info)
+}
+
+#[tauri::command]
+async fn close_access(app: AppHandle) -> Result<String, String> {
+    let active = {
+        let state = app.state::<Mutex<Option<AccessSession>>>();
+        let mut session = state
+            .lock()
+            .map_err(|_| "Access session is busy.".to_string())?;
+        session.take()
+    };
+    let Some(active) = active else {
+        return Err("Nothing is being accessed right now.".to_string());
+    };
+    let AccessSession {
+        vault_path,
+        info,
+        password,
+    } = active;
+    let handle = app.clone();
+    let vault_for_task = vault_path.clone();
+    let temp_path = info.temp_path.clone();
+    let name = info.name.clone();
+    let kind = info.kind.clone();
+    let password_for_task = password.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let progress = |event: ProgressEvent| {
+            let _ = handle.emit("vault-progress", &event);
+        };
+        access_relock(
+            &PathBuf::from(&temp_path),
+            &name,
+            &kind,
+            &PathBuf::from(&vault_for_task),
+            &password_for_task,
+            &progress,
+        )
+    })
+    .await
+    .map_err(|e| format!("Lock-again task failed: {e}"))?;
+    match result {
+        Ok(locked) => {
+            // The vault was re-locked; refresh its recent entry.
+            let mut entries = load_recent(&app);
+            if let Some(e) = entries.iter_mut().find(|e| e.vault_path == vault_path) {
+                e.size_bytes = fs::metadata(&vault_path).map(|m| m.len()).unwrap_or(0);
+                e.locked_at_unix = now_unix();
+            }
+            save_recent(&app, &entries);
+            Ok(locked.vault_path)
+        }
+        Err(e) => {
+            // Put the session back: the temp files are still there
+            // and the old vault was never touched.
+            let state = app.state::<Mutex<Option<AccessSession>>>();
+            if let Ok(mut session) = state.lock() {
+                *session = Some(AccessSession {
+                    vault_path,
+                    info,
+                    password,
+                });
+            }
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+fn get_access_session(app: AppHandle) -> Option<AccessInfo> {
+    app.state::<Mutex<Option<AccessSession>>>()
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|s| s.info.clone())
+}
+
+#[tauri::command]
+fn open_access_prompt(app: AppHandle, vault_path: String) -> Result<(), String> {
+    open_prompt_window(&app, &vault_path, false)
+}
+
+#[tauri::command]
+fn get_prompt_target(app: AppHandle) -> Option<String> {
+    app.state::<Mutex<Option<String>>>()
+        .lock()
+        .ok()?
+        .clone()
+}
+
+#[tauri::command]
+fn close_prompt_window(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("access-prompt") {
+        let _ = win.close();
+    }
+}
+
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 // ---------- Windows right-click menu (HKCU, no admin needed) ----------
 #[cfg(target_os = "windows")]
 mod ctx_menu {
@@ -248,7 +443,9 @@ mod ctx_menu {
                 .map_err(|e| e.to_string())?;
             cmd.set_value("", &format!("\"{exe}\" --lock \"%1\""))
                 .map_err(|e| e.to_string())?;
-            // .vaultlock files -> Unlock with VaultLock
+            // .vaultlock files -> Access with VaultLock (small
+            // password prompt, temp decrypt, vault stays locked).
+            // Unlock is the second verb for a permanent restore.
             let (assoc, _) = classes.create_subkey(r".vaultlock").map_err(|e| e.to_string())?;
             assoc
                 .set_value("", &"VaultLock.vault")
@@ -256,11 +453,22 @@ mod ctx_menu {
             let (key, _) = classes
                 .create_subkey(r"VaultLock.vault\shell\open")
                 .map_err(|e| e.to_string())?;
-            key.set_value("", &"Unlock with VaultLock")
+            key.set_value("", &"Access with VaultLock")
                 .map_err(|e| e.to_string())?;
             key.set_value("Icon", &exe).map_err(|e| e.to_string())?;
             let (cmd, _) = classes
                 .create_subkey(r"VaultLock.vault\shell\open\command")
+                .map_err(|e| e.to_string())?;
+            cmd.set_value("", &format!("\"{exe}\" --access \"%1\""))
+                .map_err(|e| e.to_string())?;
+            let (key, _) = classes
+                .create_subkey(r"VaultLock.vault\shell\unlock")
+                .map_err(|e| e.to_string())?;
+            key.set_value("", &"Unlock with VaultLock")
+                .map_err(|e| e.to_string())?;
+            key.set_value("Icon", &exe).map_err(|e| e.to_string())?;
+            let (cmd, _) = classes
+                .create_subkey(r"VaultLock.vault\shell\unlock\command")
                 .map_err(|e| e.to_string())?;
             cmd.set_value("", &format!("\"{exe}\" --unlock \"%1\""))
                 .map_err(|e| e.to_string())?;
@@ -308,6 +516,31 @@ fn set_context_menu(enabled: bool) -> Result<bool, String> {
 pub fn run(launch_target: Option<LaunchTarget>) {
     tauri::Builder::default()
         .manage(launch_target)
+        .manage(Mutex::new(None::<AccessSession>))
+        .manage(Mutex::new(None::<String>))
+        .setup(|app| {
+            // Wipe temp access folders left behind by a crash, so
+            // decrypted files never linger on disk unnoticed.
+            if let Ok(entries) = fs::read_dir(std::env::temp_dir()) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with("vaultlock-access-") {
+                        let _ = fs::remove_dir_all(entry.path());
+                    }
+                }
+            }
+            // Launched to access a vault: hide the main window and
+            // show only the small password prompt.
+            if let Some(target) = app.state::<Option<LaunchTarget>>().inner().clone() {
+                if target.mode == "access" {
+                    if let Some(main) = app.get_webview_window("main") {
+                        let _ = main.hide();
+                    }
+                    let _ = open_prompt_window(app.handle(), &target.path, true);
+                }
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if let Some(target) = parse_launch_target(&argv) {
                 let _ = app.emit("vaultlock-open", target);
@@ -328,7 +561,14 @@ pub fn run(launch_target: Option<LaunchTarget>) {
             get_launch_target,
             context_menu_supported,
             context_menu_status,
-            set_context_menu
+            set_context_menu,
+            access_vault,
+            close_access,
+            get_access_session,
+            open_access_prompt,
+            get_prompt_target,
+            close_prompt_window,
+            exit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running VaultLock");

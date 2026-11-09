@@ -2,8 +2,16 @@ import "@fontsource-variable/inter";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const $ = (id) => document.getElementById(id);
+
+// Small password prompt mode: ?mode=access opens just the prompt
+// window instead of the whole app (double-click a vault, or the
+// right-click "Access" entry).
+const params = new URLSearchParams(location.search);
+const isPrompt = params.get("mode") === "access";
+const promptSolo = params.get("solo") === "1";
 
 // ---------- Icons: SF Symbols style, monoline, 1.75px stroke ----------
 const ICONS = {
@@ -45,6 +53,7 @@ const state = {
   unlockPath: "",
   hoverZone: "",
   vaults: [],
+  access: null,
 };
 
 const VIEWS = ["lock", "unlock", "vaults", "settings"];
@@ -378,6 +387,7 @@ function renderVaults() {
         </div>
         <div class="vault-actions">
           <button class="mini-btn accent" type="button" data-unlock="${escapeHtml(e.vault_path)}">Unlock</button>
+          <button class="mini-btn" type="button" data-access="${escapeHtml(e.vault_path)}">Access</button>
           <button class="mini-btn" type="button" data-reveal="${escapeHtml(e.vault_path)}">Show</button>
           <button class="mini-btn" type="button" data-forget="${escapeHtml(e.vault_path)}">Forget</button>
         </div>
@@ -389,6 +399,11 @@ function renderVaults() {
       switchView("unlock");
       setUnlockPath(b.dataset.unlock);
       $("unlock-password").focus();
+    });
+  }
+  for (const b of list.querySelectorAll("[data-access]")) {
+    b.addEventListener("click", () => {
+      invoke("open_access_prompt", { vaultPath: b.dataset.access }).catch((e) => toast(String(e)));
     });
   }
   for (const b of list.querySelectorAll("[data-reveal]")) {
@@ -495,6 +510,10 @@ async function initContextMenu() {
 // ---------- Launch from the right-click menu / second instance ----------
 function applyLaunchTarget(t) {
   if (!t || !t.path) return;
+  if (t.mode === "access") {
+    invoke("open_access_prompt", { vaultPath: t.path }).catch((e) => toast(String(e)));
+    return;
+  }
   if (t.mode === "unlock") {
     switchView("unlock");
     setUnlockPath(t.path);
@@ -506,6 +525,137 @@ function applyLaunchTarget(t) {
   }
 }
 
+// ---------- Access banner (main window) ----------
+async function updateAccessBanner() {
+  try {
+    const s = await invoke("get_access_session");
+    state.access = s;
+    $("access-banner").classList.toggle("hidden", !s);
+    if (s) $("access-name").textContent = s.name;
+  } catch {
+    /* ignore */
+  }
+}
+
+$("btn-open-access-folder").addEventListener("click", () => {
+  if (state.access) {
+    invoke("reveal_in_folder", { path: state.access.temp_path }).catch((e) => toast(String(e)));
+  }
+});
+
+$("btn-lock-again").addEventListener("click", async () => {
+  try {
+    await invoke("close_access");
+    toast("Locked again. Changes saved back into the vault.");
+    await updateAccessBanner();
+    await refreshVaults();
+  } catch (e) {
+    toast(String(e));
+  }
+});
+
+// ---------- Small password prompt window ----------
+const promptState = { target: "", tempPath: "", active: false };
+
+async function lockAgainFromPrompt() {
+  const btn = $("btn-prompt-lock");
+  btn.disabled = true;
+  setMsg($("msg-prompt-session"), "Locking again...");
+  try {
+    await invoke("close_access");
+    promptState.active = false;
+    if (promptSolo) {
+      await invoke("exit_app").catch(() => {});
+    } else {
+      await invoke("close_prompt_window").catch(() => {});
+    }
+  } catch (e) {
+    setMsg($("msg-prompt-session"), String(e), "err");
+    btn.disabled = false;
+  }
+}
+
+async function initPrompt() {
+  document.querySelector(".app").classList.add("hidden");
+  $("prompt").classList.remove("hidden");
+  document.body.classList.add("prompt-mode");
+  try {
+    promptState.target = (await invoke("get_prompt_target")) || "";
+  } catch {
+    promptState.target = "";
+  }
+  const name = promptState.target.split(/[\\/]/).pop() || "vault";
+  $("prompt-name").textContent = name.replace(/\.vaultlock$/i, "");
+  $("prompt-password").focus();
+
+  // Closing the window mid-access must re-lock first, never leave
+  // decrypted files sitting in the temp folder.
+  try {
+    const win = getCurrentWindow();
+    win.onCloseRequested(async (event) => {
+      if (promptState.active) {
+        event.preventDefault();
+        await lockAgainFromPrompt();
+      } else if (promptSolo) {
+        await invoke("exit_app").catch(() => {});
+      }
+    });
+  } catch {
+    /* plain browser preview */
+  }
+
+  $("prompt-password").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("btn-access").click();
+  });
+
+  $("btn-access").addEventListener("click", async () => {
+    const password = $("prompt-password").value;
+    if (!promptState.target) {
+      setMsg($("msg-prompt"), "No vault to open.", "err");
+      return;
+    }
+    if (!password) {
+      setMsg($("msg-prompt"), "Enter the password for this vault.", "err");
+      return;
+    }
+    const btn = $("btn-access");
+    btn.disabled = true;
+    setMsg($("msg-prompt"), "Decrypting...");
+    try {
+      const info = await invoke("access_vault", { vaultPath: promptState.target, password });
+      promptState.tempPath = info.temp_path;
+      promptState.active = true;
+      $("prompt-session-name").textContent = info.name;
+      $("prompt-enter").classList.add("hidden");
+      $("prompt-session").classList.remove("hidden");
+      setMsg($("msg-prompt"), "");
+      await invoke("reveal_in_folder", { path: info.temp_path }).catch(() => {});
+    } catch (e) {
+      setMsg($("msg-prompt"), String(e), "err");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("btn-cancel-prompt").addEventListener("click", async () => {
+    if (promptSolo) {
+      await invoke("exit_app").catch(() => {});
+    } else {
+      await invoke("close_prompt_window").catch(() => {});
+    }
+  });
+
+  $("btn-prompt-open").addEventListener("click", () => {
+    if (promptState.tempPath) {
+      invoke("reveal_in_folder", { path: promptState.tempPath }).catch((e) =>
+        setMsg($("msg-prompt-session"), String(e), "err")
+      );
+    }
+  });
+
+  $("btn-prompt-lock").addEventListener("click", lockAgainFromPrompt);
+}
+
 async function initLaunchTarget() {
   try {
     applyLaunchTarget(await invoke("get_launch_target"));
@@ -515,6 +665,12 @@ async function initLaunchTarget() {
   listen("vaultlock-open", (e) => applyLaunchTarget(e.payload)).catch(() => {});
 }
 
-refreshVaults();
-initContextMenu();
-initLaunchTarget();
+if (isPrompt) {
+  initPrompt();
+} else {
+  refreshVaults();
+  initContextMenu();
+  initLaunchTarget();
+  updateAccessBanner();
+  window.addEventListener("focus", updateAccessBanner);
+}

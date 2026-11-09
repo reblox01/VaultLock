@@ -45,6 +45,13 @@
     </aside>
 
     <main class="content">
+      <div id="access-banner" class="access-banner hidden">
+        <span class="ic" data-icon="lock-open"></span>
+        <span class="access-banner-text">Accessing <strong id="access-name"></strong>. Files are decrypted in a temp folder, the vault stays locked.</span>
+        <button id="btn-open-access-folder" class="mini-btn" type="button">Open folder</button>
+        <button id="btn-lock-again" class="mini-btn accent" type="button">Lock again</button>
+      </div>
+
       <!-- Lock -->
       <section id="panel-lock" class="view">
         <header class="view-head">
@@ -216,6 +223,36 @@
       </section>
     </main>
   </div>
+
+  <!-- Small password prompt (opened instead of the whole app when
+       a vault is double-clicked or accessed from the right-click menu) -->
+  <section id="prompt" class="prompt hidden">
+    <div class="prompt-card">
+      <div id="prompt-enter">
+        <div class="drop-art"><span class="ic" data-icon="lock"></span></div>
+        <h1>Access <span id="prompt-name"></span></h1>
+        <p class="prompt-sub">Enter the password to look inside. The vault stays locked, nothing is permanently unlocked.</p>
+        <div class="field">
+          <label for="prompt-password">Password</label>
+          <div class="input-row">
+            <input id="prompt-password" type="password" placeholder="The password you locked it with" autocomplete="current-password" />
+          </div>
+        </div>
+        <button id="btn-access" class="cta" type="button">Access</button>
+        <button id="btn-cancel-prompt" class="ghost-btn" type="button">Cancel</button>
+        <p id="msg-prompt" class="msg"></p>
+      </div>
+      <div id="prompt-session" class="hidden">
+        <div class="drop-art"><span class="ic" data-icon="lock-open"></span></div>
+        <h1>Accessing <span id="prompt-session-name"></span></h1>
+        <p class="prompt-sub">Your files are open in a temp folder. Lock again when you are done and any changes will be saved back into the vault.</p>
+        <button id="btn-prompt-open" class="cta secondary" type="button">Open folder</button>
+        <button id="btn-prompt-lock" class="cta" type="button">Lock again</button>
+        <p id="msg-prompt-session" class="msg"></p>
+      </div>
+    </div>
+  </section>
+
   <div id="toast" class="toast hidden"></div>
   <script type="module" src="/main.js"></script>
 </body>

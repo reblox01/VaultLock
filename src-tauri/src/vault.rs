@@ -75,6 +75,17 @@ pub struct UnlockResult {
     pub total_bytes: u64,
 }
 
+/// Temporary access: where the decrypted files live while the vault
+/// stays locked. The vault file itself is never touched by access.
+#[derive(Serialize, Clone, Debug)]
+pub struct AccessInfo {
+    pub temp_path: String,
+    pub name: String,
+    pub kind: String,
+    pub files: u64,
+    pub total_bytes: u64,
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -350,6 +361,59 @@ fn verify_vault(path: &Path, password: &str) -> Result<VaultHeader, String> {
     Ok(header)
 }
 
+/// Decrypt every entry of an already-opened vault into `staging`,
+/// verifying each file's SHA-256 as it goes. Shared by unlock and
+/// temporary access. Returns the total plaintext bytes.
+fn decrypt_entries<R: Read>(
+    reader: &mut R,
+    header: &VaultHeader,
+    key: &[u8; 32],
+    staging: &Path,
+    progress: &dyn Fn(ProgressEvent),
+) -> Result<u64, String> {
+    for dir in &header.empty_dirs {
+        fs::create_dir_all(staging.join(dir))
+            .map_err(|e| format!("Could not stage restore: {e}"))?;
+    }
+    let total = header.entries.len() as u64;
+    let mut total_bytes: u64 = 0;
+    for (i, entry) in header.entries.iter().enumerate() {
+        progress(ProgressEvent {
+            phase: "decrypting".to_string(),
+            done: i as u64,
+            total,
+            file: entry.path.clone(),
+        });
+        let mut len_buf = [0u8; 8];
+        reader
+            .read_exact(&mut len_buf)
+            .map_err(|_| "Vault is truncated or damaged.".to_string())?;
+        let ct_len = u64::from_le_bytes(len_buf);
+        if ct_len != entry.size + TAG_LEN {
+            return Err("Vault is damaged: a file size does not match.".to_string());
+        }
+        let mut ct = vec![0u8; ct_len as usize];
+        reader
+            .read_exact(&mut ct)
+            .map_err(|_| "Vault is truncated or damaged.".to_string())?;
+        let nonce = B64
+            .decode(&entry.nonce)
+            .map_err(|_| "Vault header is damaged.".to_string())?;
+        let data = decrypt(key, &nonce, &ct)?;
+        let sha256 = format!("{:x}", Sha256::digest(&data));
+        if sha256 != entry.sha256 {
+            return Err(format!("Integrity check failed for {}.", entry.path));
+        }
+        let out_path = staging.join(&entry.path);
+        if let Some(dir) = out_path.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("Could not stage restore: {e}"))?;
+        }
+        fs::write(&out_path, &data).map_err(|e| format!("Could not write {}: {e}", entry.path))?;
+        total_bytes += entry.size;
+    }
+    Ok(total_bytes)
+}
+
 /// Unlock a vault, restoring the original file or folder next to it.
 pub fn unlock_path(
     vault: &Path,
@@ -383,50 +447,7 @@ pub fn unlock_path(
         hex_encode(&random_bytes(6))
     ));
     fs::create_dir_all(&staging).map_err(|e| format!("Could not stage restore: {e}"))?;
-    let restore = (|| -> Result<u64, String> {
-        for dir in &header.empty_dirs {
-            fs::create_dir_all(staging.join(dir))
-                .map_err(|e| format!("Could not stage restore: {e}"))?;
-        }
-        let total = header.entries.len() as u64;
-        let mut total_bytes: u64 = 0;
-        for (i, entry) in header.entries.iter().enumerate() {
-            progress(ProgressEvent {
-                phase: "decrypting".to_string(),
-                done: i as u64,
-                total,
-                file: entry.path.clone(),
-            });
-            let mut len_buf = [0u8; 8];
-            reader
-                .read_exact(&mut len_buf)
-                .map_err(|_| "Vault is truncated or damaged.".to_string())?;
-            let ct_len = u64::from_le_bytes(len_buf);
-            if ct_len != entry.size + TAG_LEN {
-                return Err("Vault is damaged: a file size does not match.".to_string());
-            }
-            let mut ct = vec![0u8; ct_len as usize];
-            reader
-                .read_exact(&mut ct)
-                .map_err(|_| "Vault is truncated or damaged.".to_string())?;
-            let nonce = B64
-                .decode(&entry.nonce)
-                .map_err(|_| "Vault header is damaged.".to_string())?;
-            let data = decrypt(&key, &nonce, &ct)?;
-            let sha256 = format!("{:x}", Sha256::digest(&data));
-            if sha256 != entry.sha256 {
-                return Err(format!("Integrity check failed for {}.", entry.path));
-            }
-            let out_path = staging.join(&entry.path);
-            if let Some(dir) = out_path.parent() {
-                fs::create_dir_all(dir).map_err(|e| format!("Could not stage restore: {e}"))?;
-            }
-            fs::write(&out_path, &data).map_err(|e| format!("Could not write {}: {e}", entry.path))?;
-            total_bytes += entry.size;
-        }
-        Ok(total_bytes)
-    })();
-    let total_bytes = match restore {
+    let total_bytes = match decrypt_entries(&mut reader, &header, &key, &staging, progress) {
         Ok(n) => n,
         Err(e) => {
             let _ = fs::remove_dir_all(&staging);
@@ -457,6 +478,109 @@ pub fn unlock_path(
         name: header.name,
         files: header.entries.len() as u64,
         total_bytes,
+    })
+}
+
+/// Decrypt a vault into a temp folder for temporary access. The vault
+/// file is NOT touched: it stays locked, and the same password still
+/// opens it afterwards. Use access_relock to save any changes back
+/// into the vault and wipe the temp folder.
+pub fn access_decrypt(
+    vault: &Path,
+    password: &str,
+    progress: &dyn Fn(ProgressEvent),
+) -> Result<AccessInfo, String> {
+    if password.is_empty() {
+        return Err("Enter the password for this vault.".to_string());
+    }
+    if !vault.exists() {
+        return Err("That vault file does not exist anymore.".to_string());
+    }
+    let file = fs::File::open(vault).map_err(|e| format!("Could not open vault: {e}"))?;
+    let mut reader = BufReader::new(file);
+    let (header, key) = read_header(&mut reader, password)?;
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "vaultlock-access-{}",
+        hex_encode(&random_bytes(6))
+    ));
+    // Folder vault: the temp folder IS the folder. File vault: the
+    // temp folder holds the single file. Either way temp_path is the
+    // folder to open.
+    let target = if header.kind == "file" {
+        temp_root.clone()
+    } else {
+        temp_root.join(&header.name)
+    };
+    fs::create_dir_all(&target).map_err(|e| format!("Could not create temp folder: {e}"))?;
+    let total_bytes = match decrypt_entries(&mut reader, &header, &key, &target, progress) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&temp_root);
+            return Err(e);
+        }
+    };
+    Ok(AccessInfo {
+        temp_path: target.to_string_lossy().into_owned(),
+        name: header.name,
+        kind: header.kind,
+        files: header.entries.len() as u64,
+        total_bytes,
+    })
+}
+
+/// Re-lock the temp folder from an access session back into the vault:
+/// encrypt whatever is in the temp folder now (edits included), verify
+/// the new vault, move it over the original vault file, and wipe the
+/// temp folder. The original vault is only replaced after the new one
+/// verifies, so a failure leaves the old vault untouched.
+pub fn access_relock(
+    temp_path: &Path,
+    name: &str,
+    kind: &str,
+    vault_path: &Path,
+    password: &str,
+    progress: &dyn Fn(ProgressEvent),
+) -> Result<LockResult, String> {
+    let source = if kind == "file" {
+        temp_path.join(name)
+    } else {
+        temp_path.to_path_buf()
+    };
+    if !source.exists() {
+        return Err(
+            "The accessed files are gone. The vault itself was never touched and is still locked."
+                .to_string(),
+        );
+    }
+    let locked = lock_path(&source, password, progress)?;
+    // lock_path created <parent>/<name>.vaultlock next to the source
+    // and deleted the source after verifying. Move it over the
+    // original vault.
+    let new_vault = PathBuf::from(&locked.vault_path);
+    if vault_path.exists() {
+        fs::remove_file(vault_path)
+            .map_err(|e| format!("Could not replace the old vault: {e}"))?;
+    }
+    if let Err(e) = fs::rename(&new_vault, vault_path) {
+        return Err(format!(
+            "Re-locked vault is at {}. Could not move it back: {e}",
+            new_vault.display()
+        ));
+    }
+    // Wipe whatever is left of the temp folder.
+    let temp_root = if kind == "file" {
+        temp_path.to_path_buf()
+    } else {
+        temp_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| temp_path.to_path_buf())
+    };
+    let _ = fs::remove_dir_all(&temp_root);
+    Ok(LockResult {
+        vault_path: vault_path.to_string_lossy().into_owned(),
+        ..locked
     })
 }
 
@@ -530,6 +654,87 @@ mod tests {
         let raw_str = String::from_utf8_lossy(&raw);
         assert!(!raw_str.contains("my secret sentence"));
         assert!(!raw_str.contains("note.txt"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn access_keeps_vault_locked_and_saves_edits_back() {
+        let base = std::env::temp_dir().join(format!("vaultlock-test-access-{}", now_unix()));
+        let _ = fs::remove_dir_all(&base);
+        let src = base.join("Docs");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), b"original").unwrap();
+        let locked = lock_path(&src, "access password 1", &silent).unwrap();
+        let vault = PathBuf::from(&locked.vault_path);
+
+        // Access: vault stays, contents readable in temp.
+        let info = access_decrypt(&vault, "access password 1", &silent).unwrap();
+        assert!(vault.exists());
+        assert_eq!(fs::read_to_string(Path::new(&info.temp_path).join("a.txt")).unwrap(), "original");
+
+        // Edit inside the temp folder, then lock again.
+        fs::write(Path::new(&info.temp_path).join("a.txt"), b"edited").unwrap();
+        assert!(Path::new(&info.temp_path).exists());
+        let relocked = access_relock(
+            Path::new(&info.temp_path),
+            &info.name,
+            &info.kind,
+            &vault,
+            "access password 1",
+            &silent,
+        )
+        .unwrap();
+        assert_eq!(relocked.vault_path, vault.to_string_lossy());
+        assert!(!Path::new(&info.temp_path).exists());
+        assert!(vault.exists());
+
+        // Unlocking the re-locked vault shows the edit.
+        let unlocked = unlock_path(&vault, "access password 1", &silent).unwrap();
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "edited");
+        assert_eq!(unlocked.files, 1);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn access_wrong_password_fails_and_leaves_no_temp() {
+        let base = std::env::temp_dir().join(format!("vaultlock-test-access-wrong-{}", now_unix()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let src = base.join("x.txt");
+        fs::write(&src, b"x").unwrap();
+        let locked = lock_path(&src, "right password 2", &silent).unwrap();
+        let err = access_decrypt(Path::new(&locked.vault_path), "wrong password 2", &silent).unwrap_err();
+        assert!(err.contains("Wrong password"));
+        assert!(Path::new(&locked.vault_path).exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn access_single_file_roundtrip() {
+        let base = std::env::temp_dir().join(format!("vaultlock-test-access-file-{}", now_unix()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let src = base.join("note.txt");
+        fs::write(&src, b"file vault").unwrap();
+        let locked = lock_path(&src, "file access pass", &silent).unwrap();
+        let vault = PathBuf::from(&locked.vault_path);
+        let info = access_decrypt(&vault, "file access pass", &silent).unwrap();
+        assert_eq!(info.kind, "file");
+        assert_eq!(
+            fs::read_to_string(Path::new(&info.temp_path).join("note.txt")).unwrap(),
+            "file vault"
+        );
+        access_relock(
+            Path::new(&info.temp_path),
+            &info.name,
+            &info.kind,
+            &vault,
+            "file access pass",
+            &silent,
+        )
+        .unwrap();
+        assert!(vault.exists());
+        assert!(!Path::new(&info.temp_path).exists());
         let _ = fs::remove_dir_all(&base);
     }
 }

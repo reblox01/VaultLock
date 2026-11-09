@@ -1,0 +1,81 @@
+name: Auto Release
+
+# Every push to main that touches code bumps the patch version,
+# tags it, and the Release workflow builds and publishes it.
+# To release without a version bump, push a commit whose message
+# contains [skip release]. The bot's own bump commits never
+# re-trigger this workflow (actor check + [skip release] marker).
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - ".github/workflows/**"
+
+permissions:
+  contents: write
+
+jobs:
+  bump-and-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Should this push release?
+        id: check
+        run: |
+          if [ "${{ github.actor }}" = "github-actions[bot]" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Bot commit, skipping."
+            exit 0
+          fi
+          if git log -1 --pretty=%B | grep -qi "\[skip release\]"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit says [skip release], skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump patch version, commit, tag
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
+          OLD=${LAST#v}
+          MAJOR=$(echo "$OLD" | cut -d. -f1)
+          MINOR=$(echo "$OLD" | cut -d. -f2)
+          PATCH=$(echo "$OLD" | cut -d. -f3)
+          NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "Bumping $OLD -> $NEW"
+
+          sed -i "s/^version = \"$OLD\"/version = \"$NEW\"/" src-tauri/Cargo.toml
+          sed -i "/name = \"vaultlock\"/{n;s/version = \"$OLD\"/version = \"$NEW\"/}" src-tauri/Cargo.lock
+          python3 - "$OLD" "$NEW" <<'EOF'
+          import json, sys
+          old, new = sys.argv[1], sys.argv[2]
+          for path in ("src-tauri/tauri.conf.json", "package.json"):
+              with open(path) as f:
+                  data = json.load(f)
+              assert data["version"] == old, f"{path} version is {data['version']}, expected {old}"
+              data["version"] = new
+              with open(path, "w") as f:
+                  json.dump(data, f, separators=(",", ":") if path.endswith("tauri.conf.json") else None, indent=2 if path.endswith("package.json") else None)
+                  f.write("\n")
+          EOF
+          grep -q "\"version\": *\"$NEW\"" src-tauri/tauri.conf.json
+          grep -q "\"version\": \"$NEW\"" package.json
+          grep -q "^version = \"$NEW\"" src-tauri/Cargo.toml
+
+          git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json package.json
+          git commit -m "chore: release v$NEW [skip release]"
+          git push origin main
+          git tag "v$NEW"
+          git push origin "v$NEW"
+          echo "Tagged v$NEW, the Release workflow builds it now."

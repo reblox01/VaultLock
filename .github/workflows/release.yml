@@ -45,6 +45,6 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "VaultLock ${{ github.ref_name }}"
           releaseBody: "Lock any file or folder with a password. AES-256-GCM, Argon2id, no backdoor."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
