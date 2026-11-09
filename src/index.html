@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VaultLock</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="hero">
+      <div class="logo">
+        <svg viewBox="0 0 48 48" width="44" height="44" aria-hidden="true">
+          <defs>
+            <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#7c5cff" />
+              <stop offset="1" stop-color="#22d3ee" />
+            </linearGradient>
+          </defs>
+          <rect x="2" y="2" width="44" height="44" rx="13" fill="url(#lg)" />
+          <path d="M24 13a7 7 0 0 0-7 7v3h-2a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V25a2 2 0 0 0-2-2h-2v-3a7 7 0 0 0-7-7zm0 3a4 4 0 0 1 4 4v3H20v-3a4 4 0 0 1 4-4zm0 9.5a2.5 2.5 0 0 1 1.4 4.6v3.4a1 1 0 0 1-1 1h-.8a1 1 0 0 1-1-1v-3.4A2.5 2.5 0 0 1 24 28.5z" fill="#fff" />
+        </svg>
+        <div>
+          <h1>VaultLock</h1>
+          <p>Lock any file or folder with a password. Real encryption, no backdoor.</p>
+        </div>
+      </div>
+      <div class="badges">
+        <span class="badge">AES-256-GCM</span>
+        <span class="badge">Argon2id</span>
+        <span class="badge">100% offline</span>
+        <span class="badge">No recovery key</span>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button id="tab-lock" class="tab active" type="button">Lock</button>
+      <button id="tab-unlock" class="tab" type="button">Unlock</button>
+      <span class="tab-hint" id="tab-hint">Pick a file or folder, set a password, done.</span>
+    </nav>
+
+    <main>
+      <section id="panel-lock" class="panel">
+        <div class="type-row">
+          <button id="type-file" class="type-btn active" type="button">File</button>
+          <button id="type-folder" class="type-btn" type="button">Folder</button>
+        </div>
+        <div id="drop-lock" class="dropzone" role="button" tabindex="0">
+          <div class="drop-icon">+</div>
+          <p class="drop-title">Drop a <span id="drop-kind">file</span> here, or click to browse</p>
+          <p class="drop-sub">It will be encrypted into a single .vaultlock file next to it.</p>
+        </div>
+        <div id="selected-lock" class="selected hidden">
+          <span class="sel-icon">FILE</span>
+          <span id="selected-lock-path" class="sel-path"></span>
+          <button id="clear-lock" class="mini-btn" type="button">Clear</button>
+        </div>
+        <div class="field">
+          <label for="lock-password">Password</label>
+          <div class="input-row">
+            <input id="lock-password" type="password" placeholder="At least 8 characters" autocomplete="new-password" />
+            <button class="eye-btn" type="button" data-for="lock-password" aria-label="Show password">Show</button>
+          </div>
+          <div class="meter"><i id="lock-meter"></i></div>
+          <p id="lock-strength" class="strength">Use a long passphrase you will remember. There is no password reset.</p>
+        </div>
+        <div class="field">
+          <label for="lock-confirm">Confirm password</label>
+          <input id="lock-confirm" type="password" placeholder="Repeat the password" autocomplete="new-password" />
+        </div>
+        <button id="btn-lock" class="cta" type="button">Lock it</button>
+        <div id="progress-lock" class="progress hidden">
+          <div class="progress-bar"><i id="progress-lock-fill"></i></div>
+          <p id="progress-lock-text" class="progress-text"></p>
+        </div>
+        <p id="msg-lock" class="msg"></p>
+      </section>
+
+      <section id="panel-unlock" class="panel hidden">
+        <div id="drop-unlock" class="dropzone" role="button" tabindex="0">
+          <div class="drop-icon">+</div>
+          <p class="drop-title">Drop a .vaultlock file here, or click to browse</p>
+          <p class="drop-sub">The original file or folder is restored next to the vault.</p>
+        </div>
+        <div id="selected-unlock" class="selected hidden">
+          <span class="sel-icon">VAULT</span>
+          <span id="selected-unlock-path" class="sel-path"></span>
+          <button id="clear-unlock" class="mini-btn" type="button">Clear</button>
+        </div>
+        <div class="field">
+          <label for="unlock-password">Password</label>
+          <div class="input-row">
+            <input id="unlock-password" type="password" placeholder="The password you locked it with" autocomplete="current-password" />
+            <button class="eye-btn" type="button" data-for="unlock-password" aria-label="Show password">Show</button>
+          </div>
+        </div>
+        <button id="btn-unlock" class="cta secondary" type="button">Unlock it</button>
+        <div id="progress-unlock" class="progress hidden">
+          <div class="progress-bar"><i id="progress-unlock-fill"></i></div>
+          <p id="progress-unlock-text" class="progress-text"></p>
+        </div>
+        <p id="msg-unlock" class="msg"></p>
+      </section>
+
+      <section class="vaults">
+        <div class="vaults-head">
+          <h2>Your vaults</h2>
+          <button id="refresh-vaults" class="mini-btn" type="button">Refresh</button>
+        </div>
+        <p class="vaults-sub">Vaults you locked with this app. Passwords are never stored, only the vault locations.</p>
+        <div id="vault-list" class="vault-list"></div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Lost password means lost files. VaultLock cannot recover them, by design. Keep a copy of important vaults somewhere safe.</p>
+    </footer>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

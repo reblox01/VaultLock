@@ -1,0 +1,27 @@
+[package]
+name = "vaultlock"
+version = "0.1.0"
+description = "Lock any file or folder with a password. Real AES-256-GCM encryption, Argon2id key derivation, no backdoor."
+authors = ["Sohail Koutari"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+walkdir = "2"
+rfd = "0.15"
+zeroize = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

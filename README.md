@@ -1,0 +1,114 @@
+# VaultLock
+
+Lock any file or folder with a password. A fresh, cross-platform desktop
+app built with Tauri v2 and Rust.
+
+## Why a new one
+
+The old repo this replaces, Albert-W/Folder-locker, is a C# WinForms app
+that does **no encryption at all**. It only renames a folder to
+`name.{2559a1f2-21d7-11d4-bdaf-00c04f60b9f0}`, a Windows Explorer trick,
+stores the password as an MD5 hash in SQLite, and ships a universal
+backdoor password that unlocks every folder. Anyone who finds the folder
+can rename it back and read everything.
+
+VaultLock fixes all of that:
+
+| Old Folder-locker | VaultLock |
+| --- | --- |
+| No encryption, rename trick only | Real AES-256-GCM encryption, every file |
+| Password stored as MD5 in SQLite | Password never stored anywhere |
+| Universal backdoor password | No backdoor, no recovery key, no reset |
+| Windows only, WinForms | Windows, macOS and Linux, Tauri + Rust |
+| Original files left readable on disk | Originals removed after the vault verifies |
+
+## Features
+
+- Lock a single file or a whole folder (subfolders included).
+- One `.vaultlock` file is created next to the original.
+- Wrong password fails authentication and restores nothing.
+- Every file is integrity checked with SHA-256 before restore.
+- Restore stages to a hidden temp folder and only moves files into
+  place after every file verifies, so a damaged vault never leaves a
+  half restored folder behind.
+- Drag and drop, browse dialogs, password strength meter, progress
+  bar, and a list of your vaults with unlock, show in folder, forget.
+- 100% offline. Nothing leaves your machine.
+
+## Security details
+
+- Key derivation: Argon2id, 64 MiB memory, 3 iterations, 1 lane.
+- Cipher: AES-256-GCM, random 12 byte nonce per file and for the header.
+- The header (file names, sizes, hashes) is encrypted too, so a vault
+  file on its own does not even reveal what is inside it.
+- Keys are zeroed from memory after use.
+- If you lose the password, the files are gone. That is the point.
+  There is no reset, no recovery key, and no support backdoor.
+
+## Install
+
+### Windows (easiest)
+
+Download `VaultLock_x64.msi` or `VaultLock_x64-setup.exe` from the
+GitHub Releases page and install it. Releases are built automatically
+by GitHub Actions when a `v*` tag is pushed.
+
+### Build it yourself
+
+Prerequisites: Rust (stable), Node.js 20+, and the Tauri system
+libraries for your OS. See the
+[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+```bash
+git clone https://github.com/reblox01/VaultLock
+cd VaultLock
+npm install
+npm run tauri build
+```
+
+The installer lands in `src-tauri/target/release/bundle/`.
+
+Run it in development mode:
+
+```bash
+npm install
+npm run tauri dev
+```
+
+The Tauri CLI is installed on demand by `npm run tauri` (it uses the
+`@tauri-apps/cli` package, so no global install is needed).
+
+## Usage
+
+1. Open VaultLock, stay on the Lock tab.
+2. Pick File or Folder, then click the drop zone or drop something on it.
+3. Set a password (at least 8 characters, a passphrase is best) and
+   confirm it.
+4. Press Lock it. The original is deleted only after the vault is
+   written and verified to open with your password.
+5. To unlock, go to the Unlock tab, pick the `.vaultlock` file, enter
+   the password, and press Unlock it. The original appears next to
+   the vault, and the vault file is deleted.
+
+## Vault format
+
+```
+magic "VL01" (4) | salt (16) | header nonce (12) | header len u32
+| header ciphertext | per file: ciphertext len u64 | ciphertext
+```
+
+The header is JSON (version, file or folder, original name, empty
+folders, and per file: relative path, size, SHA-256, nonce), encrypted
+with the password derived key. File bodies follow, each encrypted
+with its own nonce.
+
+## Roadmap
+
+- Change password on an existing vault.
+- Secure overwrite of originals before deletion.
+- Right-click "Lock with VaultLock" in the file manager.
+- Auto-lock timer for folders left unlocked.
+
+## License
+
+MIT.
