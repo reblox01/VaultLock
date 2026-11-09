@@ -19,6 +19,9 @@ on:
 
 permissions:
   contents: write
+  # Needed to dispatch the Release workflow after tagging:
+  # a tag pushed with GITHUB_TOKEN cannot trigger it on its own.
+  actions: write
 
 jobs:
   bump-and-tag:
