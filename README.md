@@ -77,7 +77,7 @@ Download `VaultLock_x64.msi` or `VaultLock_x64-setup.exe` from the
 GitHub Releases page and install it. Releases are automatic: every
 push to `main` that touches code bumps the patch version, tags it,
 and GitHub Actions builds and publishes the release. To push code
-without releasing, put `[skip release]` in the commit message.
+without releasing, put `[skip release]` in the commit subject line.
 
 ### Build it yourself
 

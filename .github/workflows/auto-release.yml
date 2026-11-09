@@ -2,9 +2,11 @@ name: Auto Release
 
 # Every push to main that touches code bumps the patch version,
 # tags it, and the Release workflow builds and publishes it.
-# To release without a version bump, push a commit whose message
-# contains [skip release]. The bot's own bump commits never
-# re-trigger this workflow (actor check + [skip release] marker).
+# To release without a version bump, put [skip release] in the
+# commit SUBJECT line (the check only reads the subject, so the
+# marker can still be explained in the message body). The bot's
+# own bump commits never re-trigger this workflow (actor check +
+# [skip release] marker).
 
 on:
   push:
@@ -34,9 +36,9 @@ jobs:
             echo "Bot commit, skipping."
             exit 0
           fi
-          if git log -1 --pretty=%B | grep -qi "\[skip release\]"; then
+          if git log -1 --pretty=%s | grep -qi "\[skip release\]"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Commit says [skip release], skipping."
+            echo "Commit subject says [skip release], skipping."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
