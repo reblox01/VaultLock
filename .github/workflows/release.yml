@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+  # Lets the Auto Release workflow start a build after it tags:
+  # a tag pushed with GITHUB_TOKEN cannot trigger this workflow
+  # on its own, but a workflow_dispatch call can.
+  workflow_dispatch:
 
 permissions:
   contents: write

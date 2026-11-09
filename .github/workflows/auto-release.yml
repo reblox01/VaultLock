@@ -44,6 +44,7 @@ jobs:
           fi
 
       - name: Bump patch version, commit, tag
+        id: bump
         if: steps.check.outputs.skip != 'true'
         run: |
           set -e
@@ -80,4 +81,16 @@ jobs:
           git push origin main
           git tag "v$NEW"
           git push origin "v$NEW"
-          echo "Tagged v$NEW, the Release workflow builds it now."
+          echo "new=v$NEW" >> "$GITHUB_OUTPUT"
+          echo "Tagged v$NEW."
+
+      # A tag pushed with GITHUB_TOKEN cannot trigger the Release
+      # workflow, so start it explicitly. workflow_dispatch is
+      # exempt from GitHub's no-workflow-from-token rule.
+      - name: Trigger Release build
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run release.yml --ref "${{ steps.bump.outputs.new }}"
+          echo "Release build dispatched for ${{ steps.bump.outputs.new }}."
